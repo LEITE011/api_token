@@ -1,0 +1,172 @@
+from flask import Flask, jsonify, request, render_template
+from sqlalchemy import select
+from models import UsuarioExemplo, NotasExemplo, SessionLocalExemplo, Funcionario
+# gerar token
+from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required, JWTManager
+# gerir papeis
+from functools import wraps
+import datetime
+
+app = Flask(__name__)
+# definir a senha, em
+app.config["JWT_SECRETY_KEY"] = "morango"
+jwt = JWTManager(app)
+
+
+def admin_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        current_user = get_jwt_identity()
+        print(f"User:{current_user}")
+        db = SessionLocalExemplo()
+        try:
+            sql = select(UsuarioExemplo).where(UsuarioExemplo.email == current_user)
+            usuario_existente = db.execute(sql).scalar()
+            print(f'Usuario existente:{usuario_existente}')
+            if usuario_existente and usuario_existente.papel == "amdin":
+                return f(*args, **kwargs)
+            dado = {
+                "msg": "Acesso Negado: Requer privilégio de administrador"
+            }
+            return jsonify(), 403
+        finally:
+            db.close()
+
+    return wrapper
+
+
+@app.route('/login', methods=['POST'])
+def login():
+    try:
+        dados_entrada = request.get_json()
+        email = dados_entrada.get('email')
+        senha = dados_entrada.get('senha')
+
+        db = SessionLocalExemplo()
+        sql = select(UsuarioExemplo).where(UsuarioExemplo.email == email)
+        usuario_existente = db.execute(sql).scalar()
+
+        if usuario_existente and usuario_existente.check_password(senha):
+            access_token = create_access_token(identity=str(usuario_existente.email))
+            dados= {
+                "access_token": access_token,
+                "papel": usuario_existente.papel,
+
+            }
+            return jsonify(dados), 200
+        dados = {
+            "mgs": "Credenciais invalidas"
+        }
+        return jsonify(dados), 401
+    except Exception as e:
+        return jsonify({"msg": str(e)}), 400
+    finally:
+        db.close()
+
+
+@app.route('/cadastro', methods=['POST'])
+def cadastro():
+    dados = request.get_json()
+    nome = dados.get('nome')
+    email = dados.get('email')
+    senha = dados.get('senha')
+    papel = dados.get('papel','usuario')
+
+    if not nome or not email or not senha:
+        return jsonify({"msg": "Nome de usuário e senha são obrigatórios"}), 400
+
+    db = SessionLocalExemplo()
+    try:
+        # Verificar se o usuário já existe
+        user_check = select(UsuarioExemplo).where(UsuarioExemplo.email == email)
+        usuario_existente = db.execute(user_check).scalar()
+
+        if usuario_existente:
+            return jsonify({"msg": "Usuário já existe"}), 409
+
+        novo_usuario = UsuarioExemplo(nome=nome, email=email, papel=papel)
+        novo_usuario.set_senha_hash(senha)
+        db.add(novo_usuario)
+        db.commit()
+
+        user_id = novo_usuario.id
+        return jsonify({"msg": "Usuário criado com sucesso", "user_id": user_id}), 201
+    except Exception as e:
+        db.rollback()
+        return jsonify({"msg": f"Erro ao registrar usuário: {str(e)}"}), 500
+    finally:
+        db.close()
+
+@app.route('/notas_exemplo', methods=['POST'])
+@jwt_required()
+def criar_nota_exemplo():
+    data = request.get_json()
+    conteudo = data.get('conteudo')
+
+    if not conteudo:
+        return jsonify({"msg": "Conteúdo da nota é obrigatório"}), 400
+
+    db = SessionLocalExemplo()
+    try:
+        nova_nota = NotasExemplo(conteudo=conteudo)
+        # Se quisesse associar ao usuário: nova_nota.user_id = current_user_id
+        db.add(nova_nota)
+        db.commit()
+        nota_id = nova_nota.id
+        return jsonify({"msg": "Nota criada", "nota_id": nota_id}), 201
+    except Exception as e:
+        db.rollback()
+        return jsonify({"msg": f"Erro ao criar nota: {str(e)}"}), 500
+    finally:
+        db.close()
+
+
+@app.route('/notas_exemplo', methods=['GET'])
+def listar_notas_exemplo():
+    db = SessionLocalExemplo()
+    try:
+        stmt = select(NotasExemplo)
+        notas_result = db.execute(stmt).scalars().all()  # .scalars().all() para obter uma lista de objetos
+        notas_list = [{"id": nota.id, "conteudo": nota.conteudo} for nota in notas_result]
+        return jsonify(notas_list)
+    finally:
+        db.close()
+
+
+@app.route('/funcionarios')
+def listar_funcionarios():
+    db = SessionLocalExemplo()
+    funcionarios_sql = select(Funcionario)
+    funcionarios_resultado = db.execute(funcionarios_sql).scalars().all()
+
+    return jsonify({"funcionarios": funcionarios_resultado}),200
+
+
+@app.route('/funcionarios_cpf')
+def buscar_funcionarios_cpf():
+    dados= request.get_json()
+
+    db = SessionLocalExemplo()
+    user_cpf = select(Funcionario).where(Funcionario.cpf == dados['cpf'])
+    user_cpf = db.execute(user_cpf).scalars().one_or_none()
+
+    return jsonify({"funcionario": user_cpf}),200
+
+
+@app.route('/cadastrar_novo_funcionarios', methods=['POST'])
+def cadastrar_novo_funcionarios():
+    dados = request.get_json()
+    db = SessionLocalExemplo()
+
+    funcionario = Funcionario(nome=dados["nome"], data_nascimento=dados["data_nasc"],
+                              cpf=dados["cpf"], email=dados["email"], cargo=dados["cargo"], salario=dados["salario"])
+    funcionario.set_password(dados["senha"])
+    db.add(funcionario)
+    db.commit()
+    db.close()
+
+    return jsonify({"funcionario": funcionario}),200
+
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5001, host="0.0.0.0")  # Rodar em uma porta diferente da API principal
